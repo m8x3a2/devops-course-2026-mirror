@@ -37,5 +37,20 @@ check "Политика входящего трафика по умолчани�
 echo "[3] Учётные записи"
 awk -F: '$3>=1000 && $3<65534 {printf "    %s (uid=%s)\n",$1,$3}' /etc/passwd
 
+echo "[4] Веб-сервер"
+check "Служба nginx активна" "active" "$(systemctl is-active nginx)"
+check "Конфигурация nginx корректна (nginx -t)" "0" \
+      "$(sudo nginx -t > /dev/null 2>&1; echo $?)"
+
+# порог в днях можно переопределить: CERT_DAYS=400 bash audit.sh
+CERT_DAYS="${CERT_DAYS:-30}"
+check "Сертификат действителен ещё не менее ${CERT_DAYS} дн." "0" \
+      "$(openssl x509 -checkend $((CERT_DAYS * 86400)) -noout -in /etc/ssl/certs/devops.crt > /dev/null 2>&1; echo $?)"
+
+# строка вида: <число файлов с записью для всех>/<права ключа>
+WW_COUNT="$(find /var/www/devops-site -perm -o+w 2>/dev/null | wc -l)"
+KEY_MODE="$(sudo stat -c '%a' /etc/ssl/private/devops.key 2>/dev/null)"
+check "Нет файлов с записью для всех, права ключа 600" "0/600" "${WW_COUNT}/${KEY_MODE}"
+
 echo "Пройдено: $PASS, не пройдено: $FAIL"
 [[ $FAIL -eq 0 ]] && exit 0 || exit 1
