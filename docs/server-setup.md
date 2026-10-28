@@ -1,9 +1,11 @@
 # Конфигурация виртуальной машины devops-vm
 
-Документ описывает конфигурацию учебного сервера после практической работы № 5
+Документ описывает конфигурацию учебного сервера после практических работ № 5 и № 6
 и позволяет восстановить её со снимка `01-clean-install`. Команды выполняются по порядку.
 
-Хост: Windows 11, VirtualBox 7.2, клиентские команды выполняются в Git Bash.
+Хост: Windows 11, VirtualBox 7.2, клиентские команды выполняются в Git Bash;
+начиная с Пр6 команды rsync и `scripts/deploy.sh` выполняются в WSL версии 1 (Ubuntu),
+куда скопированы `~/.ssh/devops_vm`, `~/.ssh/config`, `~/.ssh/known_hosts` (права 600).
 
 ## 1. Параметры машины
 
@@ -166,15 +168,99 @@ hostname -f        # devops-vm.devops.local
 
 Проверка с хоста: `ping devops.local`, `ssh devops.local`.
 
-## 8. Снимки состояния
+## 8. Веб-сервер
+
+| Параметр | Значение |
+|---|---|
+| Пакет | `nginx` (из репозитория Ubuntu), служба `nginx.service` |
+| Конфигурация ресурса | `/etc/nginx/sites-available/devops-site`, ссылка в `/etc/nginx/sites-enabled/` |
+| Стандартный ресурс | отключён: удалена ссылка `/etc/nginx/sites-enabled/default` (файл в `sites-available` сохранён) |
+| Каталог ресурса | `/var/www/devops-site`, владелец `devops:devops`, каталоги `755`, файлы `644` |
+| Сертификат | `/etc/ssl/certs/devops.crt`, `root:root`, `644`, самоподписанный, SAN `DNS:devops.local` |
+| Закрытый ключ | `/etc/ssl/private/devops.key`, `root:root`, `600` |
+| Срок действия сертификата | 365 дней с даты выпуска (`openssl x509 -in /etc/ssl/certs/devops.crt -noout -dates`) |
+| Журналы | `/var/log/nginx/devops-site.access.log`, `/var/log/nginx/devops-site.error.log` |
+| Порты | 80 (только перенаправление 301 на HTTPS), 443 (TLSv1.2, TLSv1.3); правила UFW из раздела 6 |
+
+Установка и каталог ресурса (на ВМ, под `devops`):
+
+```bash
+sudo apt update && sudo apt install -y nginx
+sudo mkdir -p /var/www/devops-site
+sudo chown -R devops:devops /var/www/devops-site
+```
+
+Сертификат и ключ:
+
+```bash
+sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+    -keyout /etc/ssl/private/devops.key \
+    -out /etc/ssl/certs/devops.crt \
+    -subj "/CN=devops.local" \
+    -addext "subjectAltName=DNS:devops.local"
+sudo chmod 600 /etc/ssl/private/devops.key
+```
+
+Конфигурация `/etc/nginx/sites-available/devops-site`:
+
+```nginx
+# Блок 1: перенаправление HTTP -> HTTPS
+server {
+    listen 80;
+    listen [::]:80;
+    server_name devops.local;
+    return 301 https://$host$request_uri;
+}
+
+# Блок 2: ресурс по HTTPS
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name devops.local;
+
+    ssl_certificate     /etc/ssl/certs/devops.crt;
+    ssl_certificate_key /etc/ssl/private/devops.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    root /var/www/devops-site;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+    error_page 404 /404.html;
+
+    access_log /var/log/nginx/devops-site.access.log;
+    error_log /var/log/nginx/devops-site.error.log;
+}
+```
+
+Активация (любое изменение применяется только через `nginx -t && reload`, не `restart`):
+
+```bash
+sudo ln -s /etc/nginx/sites-available/devops-site /etc/nginx/sites-enabled/
+sudo rm /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl reload nginx
+sudo ss -tlnp | grep nginx        # 0.0.0.0:80, 0.0.0.0:443
+```
+
+HSTS не включается (самоподписанный сертификат). Доверие на хосте: сертификат копируется
+по SSH (`scp devops:/etc/ssl/certs/devops.crt ~/devops.crt`) и передаётся клиенту через `--cacert`.
+
+Содержимое доставляется из каталога `site/` репозитория сценарием `scripts/deploy.sh`
+(rsync с `--delete --chmod=D755,F644`, одно SSH-соединение, проверка `curl --cacert`).
+
+## 9. Снимки состояния
 
 | Снимок | Создан | Состояние |
 |---|---|---|
 | `01-clean-install` | 13.10.2026 20:16 | чистая установка, `apt upgrade`, OpenSSH, ВМ выключена |
 | `02-keys-configured` | 13.10.2026 20:39 | пользователь `devops`, вход по ключу, `~/.ssh/config` на хосте |
 | `03-ssh-hardened` | 13.10.2026 21:08 | `99-hardening.conf`, порт 2222, сокет отключён, проброс 2222→2222 |
+| `04-nginx-https` | Пр6, после задания 2 | nginx, сертификат и ключ, ресурс `devops.local` по HTTPS, перенаправление HTTP→HTTPS |
 
-## 9. Проверка
+## 10. Проверка
 
 Скрипт `scripts/audit.sh` проверяет основные параметры (код возврата 0, если всё в порядке):
 
